@@ -1,0 +1,41 @@
+# Redis configuration
+redis:
+  # Connection: "tcp" or "unix"
+  network: "tcp"
+
+  # Host
+  host: "localhost:6379"
+
+  # Password (optional)
+  pass: ""
+
+  # Database number (0-15)
+  db: 0
+
+  # Queue in key
+  in: "QUEUE_IN"
+
+  # Queue out key
+  out: "QUEUE_OUT"
+
+# SQLite3 index file
+index_file: "./index.db"
+
+# Raw data dir
+data_dir: "./data/"
+
+# Poll speed in milliseconds
+# Copy data how often?
+tick: 1000
+
+# Maximum input queue size
+target_in: 50000
+
+# Minimum output queue size
+target_out: 50000
+
+# Entries per Redis command
+redis_chunk: 1000
+
+# Chunks to move at once
+data_chunk: 100000
