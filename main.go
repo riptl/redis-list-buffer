@@ -1,39 +1,47 @@
 package main
 
 import (
-	"os"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"github.com/terorie/viperstruct"
+	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
-	"github.com/sirupsen/logrus"
-	"sync/atomic"
 )
 
-var config struct{
+var config struct {
 	RNetworkMode string `viper:"redis.network,optional"`
-	RHost string `viper:"redis.host,optional"`
-	RPass string `viper:"redis.pass,optional"`
-	RNumberDB uint8 `viper:"redis.db,optional"`
-	RInKey string `viper:"redis.in,optional"`
-	ROutKey string `viper:"redis.out,optional"`
-	SIndex string `viper:"index_file,optional"`
-	SDir string `viper:"data_dir,optional"`
-	Tick uint `viper:"tick"`
-	TargetIn uint `viper:"target_in"`
-	TargetOut uint `viper:"target_out"`
-	RedisChunk uint `viper:"redis_chunk"`
-	DataChunk uint `viper:"data_chunk"`
+	RHost        string `viper:"redis.host,optional"`
+	RPass        string `viper:"redis.pass,optional"`
+	RNumberDB    uint8  `viper:"redis.db,optional"`
+	RInKey       string `viper:"redis.in,optional"`
+	ROutKey      string `viper:"redis.out,optional"`
+	SIndex       string `viper:"index_file,optional"`
+	SDir         string `viper:"data_dir,optional"`
+	Tick         uint   `viper:"tick"`
+	TargetIn     uint   `viper:"target_in"`
+	TargetOut    uint   `viper:"target_out"`
+	RedisChunk   uint   `viper:"redis_chunk"`
+	DataChunk    uint   `viper:"data_chunk"`
 }
 
 var exitRequested = uint32(0)
 var tickDuration time.Duration
 var targetIn, targetOut int64
 var redisChunk, dataChunk int64
+var empty bool
 
 func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "Usage: redis-list-buffer <config.yaml>")
+		os.Exit(1)
+	} else {
+		viper.SetConfigFile(os.Args[1])
+	}
+
 	err := exec()
 	if err != nil {
 		logrus.WithError(err).Fatal("Fatal error")
@@ -41,7 +49,12 @@ func main() {
 	}
 }
 
-func exec() error {
+func exec() (err error) {
+	err = viper.ReadInConfig()
+	if err != nil {
+		return
+	}
+
 	viper.SetDefault("redis.network", "tcp")
 	viper.SetDefault("redis.host", "localhost:6379")
 	viper.SetDefault("redis.pass", "")
@@ -51,8 +64,10 @@ func exec() error {
 	viper.SetDefault("index_file", "./index.db")
 	viper.SetDefault("data_dir", "./data/")
 
-	err := viperstruct.ReadConfig(config)
-	if err != nil { return err }
+	err = viperstruct.ReadConfig(&config)
+	if err != nil {
+		return
+	}
 
 	if config.RNumberDB >= 16 {
 		return fmt.Errorf("invalid db number: %d\n", config.RNumberDB)
@@ -99,17 +114,52 @@ func exec() error {
 		outChunks := outDelta / redisChunk
 
 		switch {
-			// Direct copy possible
-			case inChunks > 0 && outChunks > 0:
-				transferChunk()
+		// Direct copy possible
+		case inChunks > 0 && outChunks > 0:
+			logrus.Infof("Directly transferring %d items …", redisChunk)
+			err = transferChunk()
+			if err != nil {
+				logrus.WithError(err).
+					Error("Error transferring chunk.")
+			}
 
-			// Needs write
-			case inChunks > 0:
-				storeChunks(inChunks)
+		// Needs write
+		case inChunks > 0:
+			logrus.Infof("Storing %d items …", inChunks*redisChunk)
+			err = storeChunks(inChunks)
+			if err != nil {
+				logrus.WithError(err).
+					Error("Error storing chunk.")
+			}
 
-			// Needs read
-			case outChunks > 0:
-				loadChunk()
+		// Needs read
+		case outChunks > 0:
+			if empty {
+				if inLen > 0 {
+					logrus.Infof("Directly transferring all (%d) items …", inLen)
+					err = transferAll()
+					if err != nil {
+						logrus.WithError(err).
+							Error("Error transferring chunk.")
+					}
+				} else {
+					logrus.Info("Empty queue …")
+				}
+				time.Sleep(tickDuration)
+				empty = false
+				continue
+			}
+			logrus.Infof("Loading file of items …")
+			err = loadChunk()
+			if err != nil {
+				logrus.WithError(err).
+					Error("Error loading chunk.")
+			}
+
+		// Idle
+		default:
+			logrus.Info("Idle …")
+			time.Sleep(tickDuration)
 		}
 	}
 
@@ -119,9 +169,13 @@ func exec() error {
 func storeChunks(redisChunks int64) error {
 	for ; redisChunks > 0; redisChunks-- {
 		items, err := popChunk()
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		err = writeChunk(items)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -129,7 +183,9 @@ func storeChunks(redisChunks int64) error {
 func loadChunk() (err error) {
 	var remChunk []string
 	remChunk, err = readChunk()
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 
 	// Read chunk and load to Redis
 	for len(remChunk) != 0 {
@@ -145,7 +201,9 @@ func loadChunk() (err error) {
 
 		// Write to Redis
 		err = pushChunk(chunk)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 	}
 
 	return
